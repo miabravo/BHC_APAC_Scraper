@@ -1,0 +1,15 @@
+# Environments
+venv/
+env/
+__pycache__/
+
+# Data & Downloads (Don't upload giant PDFs to GitHub!)
+raw_pdfs/
+sec-edgar-filings/
+processed_text.json
+
+# OS generated files
+.DS_Store
+
+# Secrets and Keys
+.env
