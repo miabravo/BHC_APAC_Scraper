@@ -83,8 +83,8 @@ def download_latest_10ks_concurrently(
 
 
 def main() -> None:
-    # Strictly US-listed healthcare tickers that file 10-Ks.
-    tickers = ["TMO", "BIO", "ILMN", "VRTX"]
+    # Strictly US-listed companies from target list.
+    tickers = ["TMO", "BIO"]
 
     output_dir = Path("raw_pdfs")
     output_dir.mkdir(parents=True, exist_ok=True)

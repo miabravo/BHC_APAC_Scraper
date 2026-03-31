@@ -5,15 +5,14 @@ from typing import List
 import pdfplumber
 
 
-def find_dummy_pdf(raw_dir: Path) -> Path:
+def find_all_pdfs(raw_dir: Path) -> List[Path]:
     """
-    Find a (dummy) PDF in the raw_pdfs directory.
-    Uses the first *.pdf it finds.
+    Find all PDF files in the raw_pdfs directory.
     """
-    pdf_files = sorted(raw_dir.glob("*.pdf"))
+    pdf_files = sorted(raw_dir.rglob("*.pdf"))
     if not pdf_files:
         raise FileNotFoundError(f"No PDF files found in {raw_dir}")
-    return pdf_files[0]
+    return pdf_files
 
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
@@ -29,9 +28,7 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
     return "\n".join(all_text)
 
 
-def chunk_text(
-    text: str, chunk_size_words: int = 1000, overlap_words: int = 100
-) -> List[dict]:
+def chunk_text(text: str, chunk_size_words: int = 500, overlap_words: int = 50) -> List[dict]:
     """
     Split text into overlapping word chunks.
 
@@ -85,17 +82,29 @@ def main() -> None:
             f"Expected directory {raw_dir} to exist with at least one dummy PDF."
         )
 
-    pdf_path = find_dummy_pdf(raw_dir)
-    print(f"Reading PDF: {pdf_path}")
+    pdf_paths = find_all_pdfs(raw_dir)
+    print(f"Found {len(pdf_paths)} PDF file(s) in {raw_dir.resolve()}.\n")
 
-    text = extract_text_from_pdf(pdf_path)
-    print(f"Extracted {len(text.split())} words from PDF.")
+    master_chunks: List[dict] = []
+    global_chunk_id = 0
 
-    chunks = chunk_text(text, chunk_size_words=1000, overlap_words=100)
-    print(f"Created {len(chunks)} chunks.")
+    for pdf_idx, pdf_path in enumerate(pdf_paths, start=1):
+        print(f"[{pdf_idx}/{len(pdf_paths)}] Processing PDF: {pdf_path}")
+        text = extract_text_from_pdf(pdf_path)
+        word_count = len(text.split())
+        print(f"  Extracted {word_count} words.")
 
-    output_path = Path("processed_text.json")
-    save_chunks_to_json(chunks, output_path)
+        chunks = chunk_text(text, chunk_size_words=500, overlap_words=50)
+        print(f"  Created {len(chunks)} chunk(s).\n")
+
+        for chunk in chunks:
+            chunk["id"] = global_chunk_id
+            chunk["source_pdf"] = str(pdf_path)
+            master_chunks.append(chunk)
+            global_chunk_id += 1
+
+    output_path = Path("master_processed_text.json")
+    save_chunks_to_json(master_chunks, output_path)
     print(f"Saved chunks to {output_path.resolve()}")
 
 
