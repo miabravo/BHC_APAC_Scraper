@@ -5,10 +5,8 @@ __pycache__/
 
 # Data & Downloads (Don't upload giant PDFs to GitHub!)
 raw_pdfs/
-raw_transcripts/
 sec-edgar-filings/
 processed_text.json
-master_processed_text.json
 
 # OS generated files
 .DS_Store

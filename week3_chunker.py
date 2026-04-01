@@ -1,3 +1,11 @@
+"""
+Batch PDF chunker for all ``*.pdf`` under ``raw_pdfs/``.
+
+For Venture Healthcare report company extraction (pages 15–20), modality/regional
+filtering, press scraping, currency conversion, and Excel export with citations,
+see the ``dashboard/`` package and ``run_dashboard_pipeline.py``.
+"""
+
 import json
 from pathlib import Path
 from typing import List
