@@ -9,6 +9,7 @@ raw_transcripts/
 sec-edgar-filings/
 processed_text.json
 master_processed_text.json
+processed_pdfs/
 
 # OS generated files
 .DS_Store
