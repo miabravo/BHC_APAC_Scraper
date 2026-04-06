@@ -1,4 +1,5 @@
 from pathlib import Path
+from dashboard.config import DEFAULT_PUBLIC_TICKERS
 import time
 
 from sec_edgar_downloader import Downloader
@@ -47,12 +48,10 @@ def download_latest_10k(tickers: list[str], output_dir: Path) -> None:
 
 def main() -> None:
     # Strictly US-listed healthcare tickers that file 10-Ks.
-    tickers = ["TMO", "BIO", "ILMN", "VRTX"]
+    tickers = [t for t in DEFAULT_PUBLIC_TICKERS if not t.endswith(('.T', '.SW', '.AX', '.KQ', '.SZ', '.SS', '.OL', '.DE'))]
 
-    output_dir = ensure_output_dir("raw_pdfs")
+    output_dir = ensure_output_dir("sec-edgar-filings")
     download_latest_10k(tickers, output_dir)
-
 
 if __name__ == "__main__":
     main()
-
