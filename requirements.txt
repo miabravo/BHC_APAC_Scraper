@@ -1,3 +1,12 @@
+# --- UI & Excel Exports (Front-End) ---
+streamlit==1.42.0
+openpyxl==3.1.5
+
+# --- AI & PDF Processing (Extractor) ---
+openai==1.63.0
+PyMuPDF==1.25.3
+
+# --- Web Scraping & Data Eng (Existing Tools) ---
 beautifulsoup4==4.14.3
 bs4==0.0.2
 certifi==2026.2.25
@@ -28,4 +37,4 @@ soupsieve==2.8.3
 typing_extensions==4.15.0
 urllib3==2.6.3
 websockets==16.0
-yfinance==1.2.0
+yfinance==1.2.
