@@ -6,6 +6,23 @@ from io import BytesIO
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Qiagen Intel Pipeline", page_icon="🧬", layout="wide")
 
+# --- INITIALIZE SESSION STATE ---
+# We do this at the very top so the app knows the key exists before it draws anything
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+
+# --- SIDEBAR CONTROLS ---
+with st.sidebar:
+    st.header("⚙️ App Controls")
+    st.markdown("Use this panel to manage your session.")
+    
+    # The Reset Button
+    if st.button("🔄 Reset App & Clear Data", use_container_width=True, type="secondary"):
+        st.session_state.clear()
+        # Change the uploader key to force it to render a fresh upload box
+        st.session_state["uploader_key"] = 1 
+        st.rerun()
+
 # --- HEADER ---
 st.title("🧬 Competitor Intelligence Analyst")
 st.markdown("Welcome to the Qiagen Competitive Intel Platform. Upload any new competitor PDFs or text files, run the extraction pipeline, and download your structured insights.")
@@ -17,7 +34,15 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.subheader("1. Upload Documents (Optional)")
     st.markdown("Drop ad-hoc PDFs or press releases here to add them to the pipeline.")
-    uploaded_files = st.file_uploader("Upload PDFs or TXT files", type=["pdf", "txt"], accept_multiple_files=True)
+    
+    # This is the SINGLE correct uploader, properly tied to the reset key
+    uploaded_files = st.file_uploader(
+        "Upload PDFs or TXT files", 
+        type=["pdf", "txt"], 
+        accept_multiple_files=True,
+        key=st.session_state["uploader_key"] 
+    )
+    
     if uploaded_files:
         st.success(f"✅ {len(uploaded_files)} files staged for extraction.")
 
