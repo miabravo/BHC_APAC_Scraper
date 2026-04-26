@@ -12,10 +12,6 @@ Requires optional deps: yfinance, requests, bs4, pandas, openpyxl, forex-python,
 """
 
 from __future__ import annotations
-from dotenv import load_dotenv
-load_dotenv()
-from dashboard.config import RAW_TRANSCRIPTS_DIR
-from dashboard.financial_excel import build_rows_from_llm_extraction
 
 import sys
 from pathlib import Path
@@ -25,12 +21,19 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from dashboard.config import (
+    RAW_TRANSCRIPTS_DIR,
     TICKER_COMPANY_NAME_MAP,
     build_financial_extraction_system_prompt,
 )
 from dashboard.financial_excel import (
     build_placeholder_rows_from_pdf_extraction,
+    build_rows_from_llm_extraction,
+    build_rows_from_yfinance,
     export_metrics_excel,
     rows_to_dataframe,
 )
@@ -38,13 +41,14 @@ from dashboard.press_earnings_scraper import scrape_press_and_news_for_tickers
 from dashboard.annual_report_pipeline import clean_sec_filings
 from week2_downloader import main as download_sec_filings
 
+APAC_TICKER_SUFFIXES = (".T", ".KQ", ".AX", ".SS", ".SZ", ".SW", ".OL", ".DE")
+
 
 def main() -> None:
     print("=== Qiagen Market Research Dashboard pipeline ===\n")
 
     # 1) Seed company names from ticker map
-    names = list(TICKER_COMPANY_NAME_MAP.values())
-    print(f"Step 1: Loaded {len(names)} companies from ticker map.\n")
+    print(f"Step 1: Loaded {len(TICKER_COMPANY_NAME_MAP)} companies from ticker map.\n")
 
     # 2) Press / news scraper
     try:
@@ -73,23 +77,39 @@ def main() -> None:
     placeholder_rows = build_placeholder_rows_from_pdf_extraction(
         venture_pdf_name="config.TICKER_COMPANY_NAME_MAP",
         page_range="all",
-        company_names=names,
+        ticker_company_name_map=TICKER_COMPANY_NAME_MAP,
     )
     llm_rows = build_rows_from_llm_extraction(ROOT / RAW_TRANSCRIPTS_DIR)
+    apac_ticker_map = {
+        t: name for t, name in TICKER_COMPANY_NAME_MAP.items() if t.endswith(APAC_TICKER_SUFFIXES)
+    }
+    yfinance_rows = build_rows_from_yfinance(apac_ticker_map)
 
-    # Index LLM rows by company name for fast lookup
-    llm_by_company = {r["Company"].lower(): r for r in llm_rows if r.get("Company")}
+    # Use LLM rows for non-APAC tickers only; APAC rows come from structured yfinance.
+    llm_by_ticker = {
+        r["Ticker"]: r
+        for r in llm_rows
+        if r.get("Ticker") and not str(r["Ticker"]).endswith(APAC_TICKER_SUFFIXES)
+    }
+    yfinance_by_ticker = {r["Ticker"]: r for r in yfinance_rows if r.get("Ticker")}
 
-    # Merge: fill placeholder fields with LLM data where available
+    # Merge: non-APAC from LLM rows, APAC from structured yfinance rows.
     for row in placeholder_rows:
-        match = llm_by_company.get(row["Company"].lower())
+        ticker = row.get("Ticker")
+        if str(ticker).endswith(APAC_TICKER_SUFFIXES):
+            match = yfinance_by_ticker.get(ticker)
+        else:
+            match = llm_by_ticker.get(ticker)
         if match:
             for field in ("APAC Region", "Modality", "Reported Currency",
                           "Gross Revenue (Local)", "Gross Revenue (USD)", "R&D Expenses (USD)"):
                 if match.get(field) is not None:
                     row[field] = match[field]
+            if match.get("Citation"):
+                row["Citation"] = match["Citation"]
 
     df = rows_to_dataframe(placeholder_rows)
+    df = df.replace("null", "")
     out_xlsx = export_metrics_excel(df, project_root=ROOT)
     print(f"Step 5: Wrote Excel with LLM data: {out_xlsx}\n")
 
