@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from dashboard.config import DASHBOARD_METRICS_DF_COLUMNS, EXCEL_OUTPUT_FILENAME, OUTPUTS_DIR
+from dashboard.llm_prompts import call_openai_for_extraction
 
 EXCEL_COLUMNS: tuple[str, ...] = DASHBOARD_METRICS_DF_COLUMNS
 
@@ -38,6 +39,15 @@ def export_metrics_excel(
         df.to_excel(writer, index=False, sheet_name="metrics")
     return out
 
+def build_rows_from_llm_extraction(transcripts_dir: Path) -> list[dict]:
+    all_rows = []
+    for file in sorted(transcripts_dir.iterdir()):
+        if not file.is_file():
+            continue
+        text = file.read_text(encoding="utf-8", errors="ignore")
+        rows = call_openai_for_extraction(file.name, text)
+        all_rows.extend(rows)
+    return all_rows
 
 def build_placeholder_rows_from_pdf_extraction(
     venture_pdf_name: str,

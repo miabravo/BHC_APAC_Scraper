@@ -4,6 +4,7 @@ openpyxl
 
 # --- AI & PDF Processing (Extractor) ---
 openai
+python-dotenv
 PyMuPDF
 
 # --- Web Scraping & Data Eng (Existing Tools) ---

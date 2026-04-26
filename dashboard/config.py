@@ -75,6 +75,37 @@ MODALITY_KEYWORDS: Final[dict[str, str]] = {
     "digital_pcr": "digital PCR",
 }
 
+# Maps every tracked ticker to a human-readable company name for Excel seeding.
+TICKER_COMPANY_NAME_MAP: Final[dict[str, str]] = {
+    "TMO": "Thermo Fisher Scientific",
+    "BIO": "Bio-Rad Laboratories",
+    "ILMN": "Illumina",
+    "VRTX": "Vertex Pharmaceuticals",
+    "QGEN": "Qiagen",
+    "JNJ": "Johnson & Johnson",
+    "PFE": "Pfizer",
+    "MRK": "Merck & Co.",
+    "ABT": "Abbott Laboratories",
+    "DHR": "Danaher",
+    "BDX": "Becton Dickinson",
+    "4914.T": "Takasago International",
+    "LONN.SW": "Lonza Group",
+    "688238.SS": "OBiO Technology",
+    "MSB.AX": "Mesoblast",
+    "078160.KQ": "Medipost",
+    "4978.T": "ReproCELL",
+    "4527.T": "Rohto Pharmaceutical",
+    "CYP.AX": "Cynata Therapeutics",
+    "298060.KQ": "SCM LifeScience",
+    "6869.T": "Sysmex",
+    "AZT.OL": "ArcticZymes Technologies",
+    "MRK.DE": "Merck KGaA",
+    "688105.SS": "Vazyme Biotech",
+    "301047.SZ": "Sino Biological",
+    "TEM": "TEM",
+    "CBLL": "CBLL",
+}
+
 # Comprehensive public tickers for press-release / news scraping (US + intl. Yahoo symbols + IPOs).
 DEFAULT_PUBLIC_TICKERS: Final[tuple[str, ...]] = (
     "TMO",
