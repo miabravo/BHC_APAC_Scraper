@@ -125,7 +125,7 @@ Map each hit into one bucket:
 * stem_cell
 
 Hierarchy Rules:
-AAV/LV is a subset of Gene Therapy.
+AAV/LV is a subset of Gene Therapy (same hierarchy must hold in all numeric outputs: AAV/LV revenue estimates must never exceed gene-therapy estimates for value or range bounds—reconcile conflicting disclosures and document in assumptions).
 Stem Cell is a separate bucket, never part of Gene Therapy.
 
 Always use the most specific available bucket:
@@ -171,11 +171,14 @@ Core Rules
 * If segment revenue cannot be sourced exactly, still produce defensible estimates per the Spreadsheet output policy below; set insufficient_evidence true only when no credible numeric bound exists after search.
 * Focus classification only when supported by keyword framework and source evidence.
 * Do not infer modality exposure from vague biotech language alone.
+* Every cell should still be full, don't leave it blank
 
 Spreadsheet output policy (required for downstream analysis)
 * All amounts are USD millions (plain numbers only in JSON fields; no currency symbols, no commas).
 * For summary objects aav_lv_revenue_estimate, gene_therapy_revenue_estimate, stem_cell_revenue_estimate, and total_advanced_therapy_revenue: populate "value" and/or "range_low"/"range_high" whenever the company plausibly participates in that modality (including CDMO, segment, or parent revenue you can apportion). Use wide ranges when uncertain. Use null for a bucket only if exposure is effectively zero for that modality.
+* Subset consistency (required): AAV/LV manufacturing is strictly inside gene therapy manufacturing. Whenever both buckets have non-null numbers, enforce aav_lv ≤ gene therapy for each comparable field: value vs value, range_low vs range_low, range_high vs range_high. If AAV/LV is non-null but gene therapy is null, do not leave gene therapy null—set gene therapy to at least the AAV/LV level (or widen its range to subsume AAV/LV). If raw disclosures appear to violate the subset ordering, reconcile by widening gene therapy or narrowing AAV/LV and explain in assumptions.
 * When public figures are missing, infer from the closest disclosed segment, parent company revenue, facility scale, or peer benchmarks; state every inference in "assumptions" and set confidence accordingly (0–3).
+* If your primary token/keyword-driven inference still cannot produce a numeric cell estimate, you MUST create an alternative estimate for that specific cell using a transparent fallback method (e.g., peer-ratio transfer, capacity proxy, segment apportionment, site-count heuristic, or market-share backsolve). Record the exact fallback method and arithmetic in "assumptions", and add a matching explanation in evidence.notes with reported_or_inferred="inferred".
 * insufficient_evidence may be true only when search yields no usable scale signal for advanced-therapy manufacturing; in that rare case summary numbers may be null but assumptions must explain why.
 
 Return ONLY valid JSON. No markdown. No explanatory text. No prose outside JSON.
@@ -211,6 +214,7 @@ Use exactly this schema:
 },
 "evidence": [
 {
+"url": "",
 "source": "",
 "page": "",
 "keywords": [],
@@ -232,7 +236,8 @@ Use exactly this schema:
 Field Rules:
 
 * Revenue values must be numeric only (no currency symbols or commas)
-* For evidence string fields use "" or [] when unknown; for summary revenue numerics follow the Spreadsheet output policy (avoid all-null summaries when any plausible exposure exists)
+* Every object in "evidence" must include "url" set to the full canonical https (or http) URL of the specific page, filing, or PDF viewer location where the cited evidence appears; do not omit url or use placeholders for real citations. Use "" only when the evidence array is empty. "source" may hold a short human-readable document or site title alongside url.
+* For other evidence string fields use "" or [] when unknown; for summary revenue numerics follow the Spreadsheet output policy (avoid all-null summaries when any plausible exposure exists)
 * confidence must be 0,1,2,or 3 only
 
 bucket must be exactly one of:
@@ -261,11 +266,11 @@ Do not output anything except JSON.
 COMPANIES = [
     "WuXi Advanced Therapies",
     "Takara Bio",
-    "Lonza Group (APAC Viral Div.)"
+    "Lonza Group (APAC Viral Div.)",
+    "GenScript ProBio",
+    "Obio Technology"
 ]
 """
-    "GenScript ProBio",
-    "Obio Technology",
     "Porton Advanced Solutions",
     "Thermo Fisher (Viral Vector Svcs)",
     "Mesoblast Limited",
@@ -294,7 +299,7 @@ COMPANIES = [
     "Xaira Therapeutics",
     "Tempus",
     "Ceribell",
-    "GondolaBio",
+    "GondolaBio"
 ]
 """
 
