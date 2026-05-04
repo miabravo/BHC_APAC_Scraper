@@ -6,7 +6,9 @@ Optional: GEMINI_MODEL (default gemini-2.5-flash).
 Optional: ONLYGEMINI_USE_SEARCH_GROUNDING (default 1) — set to 0 to disable the Google Search grounding tool.
 Optional: ONLYGEMINI_FORCE_JSON_WITH_GROUNDING (default 0) — set to 1 to send ``responseMimeType: application/json`` even with search grounding (many setups return 400 if both are on; leave 0 unless you know your model supports it).
 Optional: ONLYGEMINI_BATCH_TIMEOUT_S (default 900) — HTTP timeout seconds for the single batch request when batch mode is on.
-Optional: ONLYGEMINI_MAX_REQUESTS_PER_MIN (default 5) — rate cap for per-company mode.
+Optional: ONLYGEMINI_RETRY_INITIAL_BACKOFF_S (default 0) — if >0, first sleep (seconds) after HTTP 429/502/503 before retry; if 0, uses a minimal default (0.5s) so retries are not slowed unless the API forces it.
+Optional: ONLYGEMINI_RETRY_MAX_BACKOFF_S (default 120) — cap each sleep and the backoff counter.
+Optional: ONLYGEMINI_RETRY_MAX_ATTEMPTS (default 12) — max POST attempts per call (includes the first try); applies to HTTP 429/502/503 and to ``requests`` timeouts (each timeout counts as one attempt).
 
 Mode is controlled by ``USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST`` in this file:
   False — one API request per company (default).
@@ -17,10 +19,12 @@ Progress is printed (disable with run_all(..., verbose=False)).
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -268,9 +272,7 @@ COMPANIES = [
     "Takara Bio",
     "Lonza Group (APAC Viral Div.)",
     "GenScript ProBio",
-    "Obio Technology"
-]
-"""
+    "Obio Technology",
     "Porton Advanced Solutions",
     "Thermo Fisher (Viral Vector Svcs)",
     "Mesoblast Limited",
@@ -299,9 +301,8 @@ COMPANIES = [
     "Xaira Therapeutics",
     "Tempus",
     "Ceribell",
-    "GondolaBio"
+    "GondolaBio",
 ]
-"""
 
 # If False: one generateContent request per company. If True: one request for all companies
 # in ``COMPANIES`` (or the list passed to ``run_all``), with a batch prompt and root JSON
@@ -442,7 +443,9 @@ def _normalize_company_entry(raw: Any) -> dict[str, Any] | None:
     return None
 
 
-def _extract_companies_array(parsed: Any) -> list[Any] | None:
+def _extract_companies_array(
+    parsed: Any, companies: list[str] | None = None
+) -> list[Any] | None:
     """Return the batch array payload from several shapes the model may return."""
     if isinstance(parsed, list):
         return parsed
@@ -460,8 +463,12 @@ def _extract_companies_array(parsed: Any) -> list[Any] | None:
             if isinstance(inner, list):
                 return inner
             if isinstance(inner, dict) and "companies" in inner:
-                return _extract_companies_array(inner)
-    if parsed and all(isinstance(v, dict) for v in parsed.values()):
+                return _extract_companies_array(inner, companies)
+    if (
+        companies
+        and parsed
+        and all(isinstance(v, dict) for v in parsed.values())
+    ):
         if all(c in parsed for c in companies):
             return [parsed[c] for c in companies]
     return None
@@ -469,7 +476,7 @@ def _extract_companies_array(parsed: Any) -> list[Any] | None:
 
 def rows_from_batch_response(parsed: Any, companies: list[str]) -> list[dict[str, Any]]:
     """Build one flat row per requested company from batch JSON."""
-    arr = _extract_companies_array(parsed)
+    arr = _extract_companies_array(parsed, companies)
     if arr is None:
         raise ValueError(
             'Expected JSON with a list field like "companies" or a top-level JSON array'
@@ -482,7 +489,7 @@ def rows_from_batch_response(parsed: Any, companies: list[str]) -> list[dict[str
         if isinstance(inner, list):
             arr = inner
         elif isinstance(inner, dict):
-            arr2 = _extract_companies_array(inner)
+            arr2 = _extract_companies_array(inner, companies)
             if arr2 is not None:
                 arr = arr2
 
@@ -605,6 +612,32 @@ def ensure_final_estimates(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _retry_after_seconds(response: requests.Response) -> float | None:
+    """Parse numeric Retry-After (seconds); ignore HTTP-date form."""
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        sec = float(str(raw).strip())
+    except ValueError:
+        return None
+    return sec if sec >= 0 else None
+
+
+def _build_user_parts(
+    prompt: str, file_parts: Sequence[tuple[bytes, str]] | None
+) -> list[dict[str, Any]]:
+    """Text prompt plus optional Gemini ``inline_data`` parts (bytes, mime_type)."""
+    parts: list[dict[str, Any]] = [{"text": prompt}]
+    if not file_parts:
+        return parts
+    for raw, mime in file_parts:
+        mt = (mime or "application/octet-stream").strip() or "application/octet-stream"
+        b64 = base64.standard_b64encode(raw).decode("ascii")
+        parts.append({"inline_data": {"mime_type": mt, "data": b64}})
+    return parts
+
+
 def _text_from_candidate(candidate: dict[str, Any]) -> str:
     parts = (candidate.get("content") or {}).get("parts") or []
     chunks = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
@@ -621,6 +654,9 @@ def call_gemini(
     *,
     use_search_grounding: bool = True,
     timeout_s: int = 180,
+    initial_backoff_floor: float = 0.0,
+    file_parts: Sequence[tuple[bytes, str]] | None = None,
+    on_retry: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """
     Call generateContent. When use_search_grounding is True, enables the
@@ -630,6 +666,19 @@ def call_gemini(
     When grounding is on, ``responseMimeType: application/json`` is omitted by
     default (API often rejects the combination); the prompt still asks for JSON
     and ``extract_json_from_text`` parses it.
+
+    On HTTP 429, 502, or 503, retries with binary exponential backoff (honors
+    numeric ``Retry-After`` when stronger than the current backoff). Other
+    non-success codes fail immediately.
+
+    On ``requests`` timeout (connect or read), retries with the same backoff
+    schedule (does not consume an HTTP status; the POST is retried).
+
+    ``on_retry``, if provided, is called with a short human-readable reason before
+    each sleep (timeouts and retryable HTTP responses) so UIs can update users.
+
+    ``file_parts`` is a sequence of ``(raw_bytes, mime_type)`` appended after the
+    text prompt as ``inline_data`` (e.g. PDFs). Same parts are resent on each retry.
     """
     url = GEMINI_URL.format(model=model)
     params = {"key": api_key}
@@ -644,28 +693,86 @@ def call_gemini(
     if (not use_search_grounding) or force_json_with_tools:
         generation_config["responseMimeType"] = "application/json"
 
+    user_parts = _build_user_parts(prompt, file_parts)
     body: dict[str, Any] = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": user_parts}],
         "generationConfig": generation_config,
     }
     if use_search_grounding:
         body["tools"] = [{"google_search": {}}]
 
-    r = requests.post(
-        url,
-        params=params,
-        json=body,
-        headers={"Content-Type": "application/json"},
-        timeout=timeout_s,
-    )
-    if not r.ok:
+    try:
+        configured_initial = float(
+            os.environ.get("ONLYGEMINI_RETRY_INITIAL_BACKOFF_S", "0").strip()
+        )
+    except ValueError:
+        configured_initial = 0.0
+    if configured_initial > 0:
+        initial_backoff = max(configured_initial, initial_backoff_floor)
+    else:
+        # Short first wait on rate limits; exponential backoff grows only if needed.
+        initial_backoff = max(0.5, initial_backoff_floor)
+
+    try:
+        max_backoff = float(os.environ.get("ONLYGEMINI_RETRY_MAX_BACKOFF_S", "120"))
+    except ValueError:
+        max_backoff = 120.0
+    try:
+        max_attempts = int(os.environ.get("ONLYGEMINI_RETRY_MAX_ATTEMPTS", "12"))
+    except ValueError:
+        max_attempts = 12
+    max_attempts = max(1, max_attempts)
+
+    retryable = frozenset({429, 502, 503})
+    backoff = initial_backoff
+    r: requests.Response | None = None
+
+    for attempt in range(max_attempts):
         try:
-            err_detail: Any = r.json()
-        except Exception:
-            err_detail = (r.text or "")[:8000]
-        raise RuntimeError(
-            f"Gemini API HTTP {r.status_code} for {url.split('?')[0]}: {err_detail!r}"
-        ) from None
+            r = requests.post(
+                url,
+                params=params,
+                json=body,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout_s,
+            )
+        except requests.exceptions.Timeout as exc:
+            if attempt >= max_attempts - 1:
+                raise RuntimeError(
+                    f"Gemini API request timed out ({timeout_s}s per attempt) after "
+                    f"{max_attempts} attempt(s) for {url.split('?')[0]}"
+                ) from exc
+            sleep_s = min(backoff, max_backoff)
+            if on_retry:
+                on_retry(
+                    f"timed out after {timeout_s}s (attempt {attempt + 1} of "
+                    f"{max_attempts}); retrying in {sleep_s:.1f}s…"
+                )
+            time.sleep(sleep_s)
+            backoff = min(backoff * 2.0, max_backoff)
+            continue
+
+        if r.ok:
+            break
+        if r.status_code not in retryable or attempt >= max_attempts - 1:
+            try:
+                err_detail: Any = r.json()
+            except Exception:
+                err_detail = (r.text or "")[:8000]
+            raise RuntimeError(
+                f"Gemini API HTTP {r.status_code} for {url.split('?')[0]}: {err_detail!r}"
+            ) from None
+        ra = _retry_after_seconds(r)
+        sleep_s = min(max(backoff, ra) if ra is not None else backoff, max_backoff)
+        if on_retry:
+            on_retry(
+                f"HTTP {r.status_code} (attempt {attempt + 1} of {max_attempts}); "
+                f"retrying in {sleep_s:.1f}s…"
+            )
+        time.sleep(sleep_s)
+        backoff = min(backoff * 2.0, max_backoff)
+
+    assert r is not None and r.ok
     data = r.json()
     candidates = data.get("candidates") or []
     if not candidates:
@@ -679,13 +786,100 @@ def call_gemini(
     return _text_from_candidate(cand0), meta
 
 
+def _prompt_with_upload_preamble(prompt: str, has_files: bool) -> str:
+    if not has_files:
+        return prompt
+    return (
+        "Reference documents are attached as inline_data after this text. "
+        "Use them with the methodology instructions below.\n\n"
+        + prompt
+    )
+
+
+def _single_company_row(
+    company: str,
+    *,
+    api_key: str,
+    model: str,
+    use_search_grounding: bool,
+    delay_s: float,
+    fp: list[tuple[bytes, str]] | None,
+    index_1based: int,
+    total: int,
+    verbose: bool,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    """One ``generateContent`` call and parsed spreadsheet row for ``company``."""
+    if verbose:
+        print(f"[{index_1based}/{total}] Starting: {company}", flush=True)
+    prompt = _prompt_with_upload_preamble(prompt_for_company(company), bool(fp))
+    i0 = index_1based - 1
+
+    def on_retry(msg: str) -> None:
+        if progress_callback:
+            progress_callback(i0, total, f"{company}: {msg}")
+
+    try:
+        raw, grounding_meta = call_gemini(
+            prompt,
+            api_key=api_key,
+            model=model,
+            use_search_grounding=use_search_grounding,
+            initial_backoff_floor=delay_s,
+            file_parts=fp,
+            on_retry=on_retry if progress_callback else None,
+        )
+        parsed = extract_json_from_text(raw)
+        row = flatten_json(parsed)
+        row = ensure_final_estimates(row)
+        gm = grounding_metadata_json(grounding_meta)
+        if gm is not None:
+            row["_grounding_metadata"] = gm
+        if verbose:
+            print(f"[{index_1based}/{total}] Finished: {company}", flush=True)
+    except Exception as e:
+        row = {
+            "company": company,
+            "_error": str(e),
+        }
+        if verbose:
+            print(
+                f"[{index_1based}/{total}] Finished (error): {company} — {e}",
+                flush=True,
+            )
+    row["_requested_company"] = company
+    return row
+
+
 def run_all(
     companies: list[str] | None = None,
     output_path: Path | None = None,
     delay_s: float = 0.0,
     verbose: bool = True,
     use_search_grounding: bool | None = None,
+    uploaded_file_parts: Sequence[tuple[bytes, str]] | None = None,
+    force_batch: bool = False,
+    use_per_company_requests: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> pd.DataFrame:
+    """
+    Run Gemini for ``COMPANIES`` (or ``companies``) and write an Excel workbook.
+
+    If ``uploaded_file_parts`` is non-empty, a single batch request is used (same
+    as ``USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST``): one prompt for every company
+    plus the uploaded documents as ``inline_data`` parts on that request.
+
+    If ``force_batch`` is True, the batch single-call path is used even when there
+    are no uploads (e.g. HTTP clients that always want one workbook for the full list).
+
+    If ``use_per_company_requests`` is True, one API call per company is used even
+    when uploads or ``force_batch`` would otherwise select the batch path; uploads
+    are attached to every per-company request.
+
+    If ``progress_callback`` is set, it is invoked as ``(done, total, label)`` where
+    ``done`` is the number of companies finished (0 before the first call), ``total``
+    is ``len(companies)``, and ``label`` is the company name or a short status string.
+    """
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -700,12 +894,19 @@ def run_all(
     companies = companies if companies is not None else COMPANIES
     out = output_path or OUTPUT_XLSX
     total = len(companies)
-    try:
-        max_rpm = float(os.environ.get("ONLYGEMINI_MAX_REQUESTS_PER_MIN", "5"))
-    except ValueError:
-        max_rpm = 5.0
-    min_interval_s = (60.0 / max_rpm) if max_rpm > 0 else 0.0
-    effective_delay_s = max(delay_s, min_interval_s)
+    fp: list[tuple[bytes, str]] | None = None
+    if uploaded_file_parts is not None:
+        fp = list(uploaded_file_parts)
+        if not fp:
+            fp = None
+    if use_per_company_requests:
+        use_batch = False
+    else:
+        use_batch = (
+            USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST
+            or (fp is not None)
+            or force_batch
+        )
 
     def log(msg: str) -> None:
         if verbose:
@@ -714,21 +915,38 @@ def run_all(
     log(
         f"Model: {model} | Google Search grounding: "
         f"{'on' if use_search_grounding else 'off'} | "
-        f"Batch single request: {'on' if USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST else 'off'}"
+        f"Batch single request: {'on' if use_batch else 'off'}"
+        + (f" | inline uploads: {len(fp)} file(s)" if fp else "")
     )
-    if not USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST:
+    if fp and use_batch and not USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST:
+        log("Batch single request forced on because reference uploads were provided.")
+    if force_batch and not USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST and not fp and use_batch:
+        log("Batch single request forced on (force_batch).")
+    if use_per_company_requests and fp:
         log(
-            "Per-company pacing: "
-            f"{effective_delay_s:.2f}s between request starts "
-            f"(max {max_rpm:g} req/min, delay_s={delay_s})"
+            f"Per-company mode with inline uploads on each request ({len(fp)} file(s))."
+        )
+    if not use_batch:
+        log(
+            "Per-company API calls: sequential; timeouts and HTTP 429/502/503 use "
+            f"exponential backoff (ONLYGEMINI_RETRY_*; delay_s floor={delay_s:g})"
         )
 
     rows: list[dict[str, Any]] = []
 
-    if USE_ONE_API_CALL_FOR_ENTIRE_COMPANY_LIST:
+    if use_batch:
+        if progress_callback:
+            progress_callback(0, total, "batch: submitting one request…")
         log(f"Starting one API call for all {total} companies…")
         try:
             prompt = prompt_for_all_companies(companies)
+            if fp:
+                prompt = (
+                    "Reference documents are attached after this paragraph as "
+                    "inline_data parts. Use them together with the methodology below "
+                    "(including external search where enabled).\n\n"
+                    + prompt
+                )
             batch_timeout = int(os.environ.get("ONLYGEMINI_BATCH_TIMEOUT_S", "900"))
             raw, grounding_meta = call_gemini(
                 prompt,
@@ -736,10 +954,17 @@ def run_all(
                 model=model,
                 use_search_grounding=use_search_grounding,
                 timeout_s=batch_timeout,
+                initial_backoff_floor=delay_s,
+                file_parts=fp,
+                on_retry=(
+                    (lambda m: progress_callback(0, total, f"batch: {m}"))
+                    if progress_callback
+                    else None
+                ),
             )
             parsed = extract_json_from_text(raw)
             flat_list = rows_from_batch_response(parsed, companies)
-            for company, row in zip(companies, flat_list):
+            for i_row, (company, row) in enumerate(zip(companies, flat_list), start=1):
                 row = dict(row)
                 row = ensure_final_estimates(row)
                 gm = grounding_metadata_json(grounding_meta)
@@ -747,6 +972,8 @@ def run_all(
                     row["_grounding_metadata"] = gm
                 row["_requested_company"] = company
                 rows.append(row)
+                if progress_callback:
+                    progress_callback(i_row, total, company)
             log("Finished one API call for all companies.")
         except Exception as e:
             log(f"Batch API call failed: {e}")
@@ -758,44 +985,33 @@ def run_all(
                         "_error": str(e),
                     }
                 )
+            if progress_callback:
+                progress_callback(0, total, f"batch failed: {e}")
     else:
-        last_request_started: float | None = None
+        if progress_callback:
+            progress_callback(0, total, "starting…")
         for i, company in enumerate(companies):
             n = i + 1
-            if last_request_started is not None and effective_delay_s > 0:
-                elapsed = time.monotonic() - last_request_started
-                wait_s = effective_delay_s - elapsed
-                if wait_s > 0:
-                    log(
-                        f"[{n}/{total}] Waiting {wait_s:.2f}s to respect rate limit…"
-                    )
-                    time.sleep(wait_s)
-            log(f"[{n}/{total}] Starting: {company}")
-            prompt = prompt_for_company(company)
-            try:
-                last_request_started = time.monotonic()
-                raw, grounding_meta = call_gemini(
-                    prompt,
-                    api_key=api_key,
-                    model=model,
-                    use_search_grounding=use_search_grounding,
-                )
-                parsed = extract_json_from_text(raw)
-                row = flatten_json(parsed)
-                row = ensure_final_estimates(row)
-                gm = grounding_metadata_json(grounding_meta)
-                if gm is not None:
-                    row["_grounding_metadata"] = gm
-                log(f"[{n}/{total}] Finished: {company}")
-            except Exception as e:
-                row = {
-                    "company": company,
-                    "_error": str(e),
-                }
-                log(f"[{n}/{total}] Finished (error): {company} — {e}")
-            row["_requested_company"] = company
+            if progress_callback:
+                progress_callback(i, total, f"starting: {company}")
+            row = _single_company_row(
+                company,
+                api_key=api_key,
+                model=model,
+                use_search_grounding=use_search_grounding,
+                delay_s=delay_s,
+                fp=fp,
+                index_1based=n,
+                total=total,
+                verbose=verbose,
+                progress_callback=progress_callback,
+            )
             rows.append(row)
+            if progress_callback:
+                progress_callback(n, total, company)
 
+    if progress_callback:
+        progress_callback(total, total, "writing spreadsheet…")
     log(f"Writing spreadsheet: {out}")
     df = pd.DataFrame(rows)
     df = df.reindex(sorted(df.columns), axis=1)
